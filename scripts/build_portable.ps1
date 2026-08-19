@@ -4,6 +4,7 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $ModelSource = Join-Path $ProjectRoot "models\mfr"
 $Distribution = Join-Path $ProjectRoot "dist\mathlatex"
+$Icon = Join-Path $ProjectRoot "assets\mathlatex.ico"
 
 if (-not (Test-Path -LiteralPath $Python)) {
     throw "Development environment not found. Create .venv and install dev dependencies first."
@@ -11,6 +12,9 @@ if (-not (Test-Path -LiteralPath $Python)) {
 
 & $Python -m PyInstaller --noconfirm --clean --windowed --onedir `
     --name mathlatex `
+    --icon $Icon `
+    --add-data "$Icon;assets" `
+    --collect-data rapidocr `
     --paths (Join-Path $ProjectRoot "src") `
     (Join-Path $ProjectRoot "run_mathlatex.py")
 

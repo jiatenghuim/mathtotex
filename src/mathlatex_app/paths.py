@@ -25,3 +25,9 @@ def model_dir() -> Path:
 def mfr_dir() -> Path:
     return model_dir() / "mfr"
 
+
+def resource_path(relative: str) -> Path:
+    """Locate a source asset or a PyInstaller bundled data file."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / relative
+    return application_dir() / relative

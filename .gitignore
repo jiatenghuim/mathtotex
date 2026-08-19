@@ -8,5 +8,6 @@ __pycache__/
 build/
 dist/
 models/
+outputs/
 *.spec
 *.log
