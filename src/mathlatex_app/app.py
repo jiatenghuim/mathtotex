@@ -6,10 +6,23 @@ import queue
 import sys
 import threading
 from pathlib import Path
-from tkinter import BooleanVar, Canvas, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
+from tkinter import (
+    Canvas,
+    Menu,
+    StringVar,
+    TclError,
+    Text,
+    Tk,
+    Toplevel,
+    filedialog,
+    messagebox,
+    ttk,
+)
 
 from PIL import Image, ImageGrab, ImageTk
 
+from .document import CopyStyle, RecognitionDocument
+from .paths import resource_path
 from .pipeline import MathLatexPipeline
 
 
@@ -73,13 +86,13 @@ class SelectionOverlay:
 class MathLatexApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
-        self.root.title("MathLaTeX - 数学公式识别")
+        self.root.title("MathLaTeX - 中英文与数学公式识别")
         self.root.geometry("900x560")
         self.root.minsize(700, 430)
         self.pipeline: MathLatexPipeline | None = None
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.document = RecognitionDocument(())
         self.status = StringVar(value="就绪：可截图、读取剪贴板或打开图片")
-        self.split_lines = BooleanVar(value=True)
         self._build_ui()
         self.root.after(80, self._poll_events)
 
@@ -98,10 +111,14 @@ class MathLatexApp:
             side="left", padx=(8, 0)
         )
         ttk.Button(toolbar, text="打开图片", command=self.open_image).pack(side="left", padx=(8, 0))
-        ttk.Checkbutton(toolbar, text="自动拆分多行", variable=self.split_lines).pack(
-            side="left", padx=(18, 0)
+        self.copy_button = ttk.Button(
+            toolbar,
+            text="复制内容 / LaTeX",
+            command=lambda: self.copy_result("raw"),
         )
-        ttk.Button(toolbar, text="复制 LaTeX", command=self.copy_result).pack(side="right")
+        self.copy_button.pack(side="right")
+        self.copy_button.bind("<Enter>", self._show_copy_menu)
+        self._build_copy_menu()
 
         ttk.Label(outer, textvariable=self.status, foreground="#0969da").pack(
             fill="x", pady=(14, 8)
@@ -118,9 +135,31 @@ class MathLatexApp:
 
         ttk.Label(
             outer,
-            text="提示：按 Esc 可取消截图；多行结果会自动放入 aligned 环境。",
+            text="提示：按 Esc 取消截图；直接点击复制原始结果，悬停可选择 LaTeX 格式。",
             foreground="#666666",
         ).pack(fill="x", pady=(8, 0))
+
+    def _build_copy_menu(self) -> None:
+        self.copy_menu = Menu(self.root, tearoff=False)
+        choices: tuple[tuple[str, CopyStyle], ...] = (
+            ("复制原始内容", "raw"),
+            (r"\ → \\ 转义反斜杠", "escaped"),
+            ("$...$ 行内公式", "dollar-inline"),
+            ("$$...$$ 独立公式", "dollar-display"),
+            (r"\(...\) 行内公式", "paren-inline"),
+            (r"\[...\] 独立公式", "bracket-display"),
+            ("JSON 字符串", "json"),
+        )
+        for label, style in choices:
+            self.copy_menu.add_command(
+                label=label,
+                command=lambda selected=style: self.copy_result(selected),
+            )
+
+    def _show_copy_menu(self, _event=None) -> None:
+        x = self.copy_button.winfo_rootx()
+        y = self.copy_button.winfo_rooty() + self.copy_button.winfo_height()
+        self.copy_menu.post(x, y)
 
     def capture(self) -> None:
         self.root.withdraw()
@@ -158,7 +197,7 @@ class MathLatexApp:
     def open_image(self) -> None:
         selected = filedialog.askopenfilename(
             parent=self.root,
-            title="选择包含数学公式的图片",
+            title="选择包含中英文或数学公式的图片",
             filetypes=[
                 ("图片", "*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff"),
                 ("所有文件", "*.*"),
@@ -177,21 +216,20 @@ class MathLatexApp:
         self._recognize_async(image)
 
     def _recognize_async(self, image: Image.Image) -> None:
-        self.status.set("正在识别…首次使用会加载模型，请稍候")
+        self.status.set("正在识别中英文与公式…首次使用会加载模型，请稍候")
         worker = threading.Thread(
             target=self._recognize_worker,
-            args=(image.copy(), bool(self.split_lines.get())),
+            args=(image.copy(),),
             daemon=True,
         )
         worker.start()
 
-    def _recognize_worker(self, image: Image.Image, split_lines: bool) -> None:
+    def _recognize_worker(self, image: Image.Image) -> None:
         try:
             if self.pipeline is None:
                 self.pipeline = MathLatexPipeline()
-            lines = self.pipeline.recognize_image(image, split_lines=split_lines)
-            result = self.pipeline.format_latex(lines)
-            self.events.put(("success", result))
+            document = self.pipeline.recognize_image(image)
+            self.events.put(("success", document))
         except Exception as exc:  # noqa: BLE001 - worker errors are reported in the UI.
             self.events.put(("error", f"{type(exc).__name__}: {exc}"))
 
@@ -202,23 +240,35 @@ class MathLatexApp:
             pass
         else:
             if kind == "success":
+                self.document = payload
+                result = self.document.render("raw")
                 self.output.delete("1.0", "end")
-                self.output.insert("1.0", str(payload))
-                self.status.set("识别完成" if payload else "没有识别到公式")
+                self.output.insert("1.0", result)
+                if result:
+                    self.status.set(
+                        f"识别完成：{self.document.text_count} 个文字块，"
+                        f"{self.document.formula_count} 个公式块"
+                    )
+                else:
+                    self.status.set("没有识别到文字或公式")
             else:
                 self.status.set("识别失败（程序仍可继续使用）")
                 messagebox.showerror("识别失败", str(payload), parent=self.root)
         finally:
             self.root.after(80, self._poll_events)
 
-    def copy_result(self) -> None:
-        value = self.output.get("1.0", "end-1c")
+    def copy_result(self, style: CopyStyle = "raw") -> None:
+        self.copy_menu.unpost()
+        if style == "raw":
+            value = self.output.get("1.0", "end-1c")
+        else:
+            value = self.document.render(style)
         if not value:
             return
         self.root.clipboard_clear()
         self.root.clipboard_append(value)
         self.root.update()
-        self.status.set("LaTeX 已复制到剪贴板")
+        self.status.set("内容已复制到剪贴板")
 
 
 def main() -> None:
@@ -227,6 +277,10 @@ def main() -> None:
 
         raise SystemExit(0 if run_self_test() else 1)
     root = Tk()
+    try:
+        root.iconbitmap(default=str(resource_path("assets/mathlatex.ico")))
+    except TclError:
+        root.iconname("MathLaTeX")
     MathLatexApp(root)
     root.mainloop()
 
